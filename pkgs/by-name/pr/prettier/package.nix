@@ -1,3 +1,37 @@
+/**
+  # Example
+
+  Prettier with plugins and Vim Home Manager configuration
+
+  ```nix
+  {
+    lib,
+    pkgs,
+    ...
+  }
+  let
+    prettierCustomized = pkgs.prettier.override {
+      plugins = with pkgs.nodePackages; [
+        prettier-plugin-toml
+        # ...
+      ];
+    };
+  in
+  {
+    config.programs.vim = {
+      enable = true;
+
+      plugins = with pkgs.vimPlugins; [
+        vim-prettier
+      ];
+
+      extraConfig = ''
+        let g:prettier#exec_cmd_path = "${lib.getExe prettierCustomized}"
+      '';
+    };
+  }
+  ```
+*/
 {
   fetchFromGitHub,
   lib,
@@ -6,7 +40,119 @@
   stdenv,
   versionCheckHook,
   yarn-berry,
+  plugins ? [ ],
 }:
+let
+  /**
+    # Example
+
+    ```nix
+    exportRelativePathOf (builtins.fromJSON "./package.json")
+    =>
+    lib/node_modules/prettier-plugin-toml/./lib/index.cjs
+    ```
+
+    # Type
+
+    ```
+    exportRelativePathOf :: set -> str
+    ```
+
+    # Arguments
+
+    packageJsonAttrs
+    : Attribute set with shape similar to `package.json` file
+  */
+  ## Blame NodeJS
+  exportRelativePathOf =
+    let
+      nodeExportAttrAddresses = [
+        [ "main" ]
+        [
+          "exports"
+          "."
+          "default"
+        ]
+        [
+          "exports"
+          "."
+        ]
+        [
+          "exports"
+          "default"
+        ]
+        [ "exports" ]
+      ];
+
+      recAtterByPath =
+        addresses: default: attrs:
+        if builtins.length addresses == 0 then
+          default
+        else
+          let
+            addressesNext = builtins.head addresses;
+            addressesRemaning = lib.lists.drop 1 addresses;
+          in
+          lib.attrByPath addressesNext (recAtterByPath addressesRemaning default attrs) attrs;
+    in
+    packageJsonAttrs:
+    recAtterByPath nodeExportAttrAddresses (builtins.head (
+      lib.attrByPath [ "prettier" "plugins" ] [ "null" ] packageJsonAttrs
+    )) packageJsonAttrs;
+
+  /**
+    # Example
+
+    ```nix
+    nodeEntryPointOf pkgs.nodePackages.prettier-plugin-toml
+    =>
+    /nix/store/<NAR_HASH>-prettier-plugin-toml-<VERSION>/lib/node_modules/prettier-plugin-toml/./lib/index.cjs
+    ```
+
+    # Type
+
+    ```
+    nodeEntryPointOf :: pkg => str
+    ```
+
+    # Arguments
+
+    plugin
+    : Attribute set with `.packageName` and `.outPath` defined
+  */
+  nodeEntryPointOf =
+    plugin:
+    let
+      pluginDir = "${plugin.outPath}/lib/node_modules/${plugin.packageName}";
+
+      packageJsonAttrOf =
+        plugin:
+        let
+          path = "${pluginDir}/package.json";
+          file =
+            if builtins.pathExists path then
+              builtins.readFile path
+            else
+              throw ''${plugin.packageName}: does not provide package.json at "${path}"'';
+        in
+        builtins.fromJSON file;
+
+      exportPath = exportRelativePathOf (packageJsonAttrOf plugin);
+
+      pathAbsoluteNaive = "${pluginDir}/${exportPath}";
+      pathAbsoluteFallback = "${pluginDir}/${exportPath}.js";
+    in
+    if builtins.pathExists pathAbsoluteNaive then
+      pathAbsoluteNaive
+    else if builtins.pathExists pathAbsoluteFallback then
+      pathAbsoluteFallback
+    else
+      lib.warn ''
+        ${plugin.packageName}: error context, tried finding entry point under;
+        pathAbsoluteNaive -> ${pathAbsoluteNaive}
+        pathAbsoluteFallback -> ${pathAbsoluteFallback}
+      '' throw ''${plugin.packageName}: does not provide parse-able entry point'';
+in
 stdenv.mkDerivation (finalAttrs: {
   pname = "prettier";
   version = "3.6.2";
@@ -41,7 +187,13 @@ stdenv.mkDerivation (finalAttrs: {
 
     makeBinaryWrapper "${lib.getExe nodejs}" "$out/bin/prettier" \
       --add-flags "$out/bin/prettier.cjs"
-
+  ''
+  + lib.optionalString (builtins.length plugins > 0) ''
+    wrapProgram $out/bin/prettier --add-flags "${
+      builtins.concatStringsSep " " (lib.map (plugin: "--plugin=${nodeEntryPointOf plugin}") plugins)
+    }";
+  ''
+  + ''
     runHook postInstall
   '';
 
@@ -57,6 +209,9 @@ stdenv.mkDerivation (finalAttrs: {
     homepage = "https://prettier.io/";
     license = lib.licenses.mit;
     mainProgram = "prettier";
-    maintainers = with lib.maintainers; [ l0b0 ];
+    maintainers = with lib.maintainers; [
+      l0b0
+      S0AndS0
+    ];
   };
 })
